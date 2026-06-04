@@ -1,0 +1,79 @@
+<!-- sites.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Data Movement Manager - Sites</title>
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <header>
+        <h1>Data Movement Manager</h1>
+    </header>
+    <nav>
+        <a href="/">Home</a>
+        <a href="/sites">Sites</a>
+    </nav>
+    <div style="text-align: center; margin: 20px;">
+        <button type="button" onclick="refreshSites()">Refresh Sites</button>
+    </div>
+    <div class="container">
+        <table>
+            <thead>
+                <tr>
+                    <th>RSE Name</th>
+                    <th>SENSE URI</th>
+                    <th>Endpoints</th>
+                    <th>IP Range</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for site in data %}
+                <tr>
+                    <td>{{ site.name }}</td>
+                    <td>{{ site.sense_uri }}</td>
+                    <td>
+                        <ul>
+                            {% for endpoint in site.endpoints %}
+                            <li class="{{ 'red' if endpoint.is_allocated else '' }}">
+                                {{ endpoint.hostname }}
+                            </li>
+                            {% endfor %}
+                        </ul>
+                    </td>
+                    <td>
+                        <ul>
+                            {% for endpoint in site.endpoints %}
+                            <li class="{{ 'red' if endpoint.is_allocated else '' }}">
+                                {{ endpoint.ip_range }}
+                            </li>
+                            {% endfor %}
+                        </ul>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        <script>
+            function refreshSites() {
+                fetch('/refresh_sites', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                })
+                .then(response => response.text())
+                .then(data => alert(data))
+                .catch(error => {
+                    console.error('Error:', error);
+                    alert("Failed to Refresh Sites");
+                });
+            }
+        </script>
+    </div>
+    <footer>
+        <p>&copy; Apache License, Version 2.0</p>
+    </footer>
+</body>
+</html>

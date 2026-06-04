@@ -1,0 +1,232 @@
+body {
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    background-color: #f4f4f9;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+    color: #333;
+}
+
+header, h1 {
+    background-color: #0078D4;
+    color: white;
+    padding: 20px;
+    text-align: center;
+    margin: 0;
+}
+
+nav {
+    background-color: #005a9e;
+    padding: 10px;
+    text-align: center;
+}
+
+nav a {
+    color: white;
+    text-decoration: none;
+    margin: 0 15px;
+    font-size: 16px;
+    transition: color 0.3s;
+}
+
+nav a:hover {
+    color: #ffdd57;
+}
+
+.container {
+    flex: 1;
+    padding: 20px;
+    max-width: 100%;
+    margin: 20px auto;
+    background-color: white;
+    box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+    border-radius: 8px;
+    overflow-x: auto;
+}
+
+table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 20px 0;
+    table-layout: fixed;
+}
+
+th, td {
+    border: 1px solid #ddd;
+    padding: 10px;
+    text-align: center;
+    font-size: 12px;
+    word-wrap: break-word;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+th {
+    background-color: #f2f2f2;
+    font-weight: bold;
+}
+
+tbody tr:nth-child(even) {
+    background-color: #f9f9f9;
+}
+
+tbody tr:hover {
+    background-color: #e6e6e6;
+}
+
+.health-red {
+    background-color: red;
+}
+
+.health-green {
+    background-color: green;
+}
+
+button {
+    background-color: #0078D4;
+    color: white;
+    border: none;
+    padding: 5px 10px;
+    border-radius: 3px;
+    cursor: pointer;
+    transition: background-color 0.3s;
+}
+
+button:hover {
+    background-color: #005a9e;
+}
+
+footer {
+    text-align: center;
+    font-size: 12px;
+    color: #999;
+    padding: 15px;
+    background-color: #f4f4f9;
+    box-shadow: 0 -2px 4px rgba(0, 0, 0, 0.1);
+}
+
+footer p {
+    margin: 0;
+}
+
+li {
+    color: green;
+    font-weight: bold;
+    margin-bottom: 5px;
+    text-align: left;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.red {
+    color: red;
+}
+
+.details-card {
+    max-width: 1100px;
+    margin: 0 auto;
+}
+
+.details-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px;
+    margin: 14px 0 20px;
+}
+
+.summary-box {
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+    padding: 10px 12px;
+    background: #fafbff;
+}
+
+.summary-label {
+    font-size: 12px;
+    color: #666;
+    margin-bottom: 6px;
+}
+
+.summary-value {
+    font-size: 20px;
+    font-weight: 700;
+}
+
+.status-badge {
+    display: inline-block;
+    padding: 4px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.2px;
+}
+
+.status-good {
+    background: #d1fae5;
+    color: #065f46;
+}
+
+.status-warn {
+    background: #fef3c7;
+    color: #92400e;
+}
+
+.status-bad {
+    background: #fee2e2;
+    color: #991b1b;
+}
+
+.details-sections {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 12px;
+}
+
+.details-section {
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+    padding: 12px;
+    background: #fff;
+}
+
+.details-section h3 {
+    margin: 0 0 10px;
+    font-size: 14px;
+    color: #0f172a;
+}
+
+.details-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 6px 0;
+    border-bottom: 1px dashed #eceff4;
+}
+
+.details-row:last-child {
+    border-bottom: none;
+}
+
+.details-label {
+    color: #64748b;
+    font-size: 12px;
+    min-width: 130px;
+}
+
+.details-value {
+    font-size: 12px;
+    text-align: right;
+    word-break: break-word;
+}
+
+.details-actions {
+    border-bottom: none;
+    margin-top: 16px;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    gap: 8px;
+}

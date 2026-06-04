@@ -1,0 +1,69 @@
+<!-- index.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Data Movement Manager - Home</title>
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <header>
+        <h1>Data Movement Manager</h1>
+    </header>
+    <nav>
+        <a href="/">Home</a>
+        <a href="/sites">Sites</a>
+    </nav>
+    <div class="container">
+        <table>
+            <thead>
+                <tr>
+                    <th>Rule ID</th>
+                    <th>DMM Status</th>
+                    <th>SENSE Status</th>
+                    <th>Source RSE</th>
+                    <th>Source IPv6 Range</th>
+                    <th>Source Hostname</th>
+                    <th>Destination RSE</th>
+                    <th>Destination IPv6 Range</th>
+                    <th>Destination Hostname</th>
+                    <th>Priority</th>
+                    <th>Size (GB)</th>
+                    <th>Allocated Bandwidth (Gbps)</th>
+                    <th>Details</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for req in data %}
+                <tr>
+                    <td>{{ req.rule_id }}</td>
+                    <td>{{ req.transfer_status }}</td>
+                    <td>{{ req.sense_circuit_status }}</td>
+                    <td>{{ req.src_site.name }}</td>
+                    <td>{{ req.src_endpoint.ip_range }}</td>
+                    <td>{{ req.src_endpoint.hostname }}</td>
+                    <td>{{ req.dst_site.name }}</td>
+                    <td>{{ req.dst_endpoint.ip_range }}</td>
+                    <td>{{ req.dst_endpoint.hostname }}</td>
+                    <td>{{ req.priority }}</td>
+                    <td>{{ req.rule_size / 1024 / 1024 / 1024 }}</td>
+                    <td>{{ req.allocated_bandwidth_mbps / 1000 if req.allocated_bandwidth_mbps is not none else 0 }}</td>
+                    <td><button onclick="sendRuleID(this)">See More</button></td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    <footer>
+        <p>&copy; Apache License, Version 2.0</p>
+    </footer>
+    <script>
+        function sendRuleID(button) {
+            let rowElement = button.closest('tr'); 
+            let rule_id = rowElement.cells[0].innerText;
+            window.location.href = `/details/${rule_id}`;
+        }
+    </script>
+</body>
+</html>
