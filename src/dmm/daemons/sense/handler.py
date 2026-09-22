@@ -10,14 +10,15 @@ from dmm.db.session import databased
 
 from dmm.core.sense import (
     get_instance_status,
-    affiliate_endpoints,
     is_affiliated_state,
+    is_circuit_active,
     is_create_ready,
     is_create_failed,
     is_modify_failed,
     is_being_modified,
     is_ready_for_modify,
 )
+from dmm.core.allocation import affiliate_endpoints
 from dmm.core.utils import release_endpoints_and_addresses
 
 class SENSEHandlerDaemon(DaemonBase):
@@ -64,9 +65,11 @@ class SENSEHandlerDaemon(DaemonBase):
 
     @staticmethod
     def _pair_stream_cap(src_site_name: str, dst_site_name: str) -> int:
-        pair_key = f"{src_site_name}-{dst_site_name}"
         default_streams = config_get_int("fts", "default_num_streams", default=200)
-        return config_get_int("fts-streams", pair_key, default=default_streams)
+        pair_stream = config_get_int("fts-streams", f"{src_site_name}-{dst_site_name}", default=None)
+        if pair_stream is None:
+            pair_stream = config_get_int("fts-streams", f"{dst_site_name}-{src_site_name}", default=None)
+        return pair_stream if pair_stream is not None else default_streams
 
     def _rebalance_fts_streams(self, session) -> None:
         active_reqs = Request.get_by_status(
@@ -78,7 +81,7 @@ class SENSEHandlerDaemon(DaemonBase):
 
         grouped_by_pair = defaultdict(list)
         for req in active_reqs:
-            if not is_create_ready(req.sense_circuit_status):
+            if not is_circuit_active(req.sense_circuit_status):
                 continue
             if not req.src_site or not req.dst_site:
                 continue
@@ -110,7 +113,7 @@ class SENSEHandlerDaemon(DaemonBase):
 
     @databased
     def run_once(self, session=None):
-        reqs = Request.get_by_status(statuses=[RequestStatus.RETRY, RequestStatus.STAGED, RequestStatus.PROVISIONED, RequestStatus.CANCELED, RequestStatus.STALE, RequestStatus.DECIDED], session=session)
+        reqs = Request.get_by_status(statuses=[RequestStatus.RETRY, RequestStatus.STAGED, RequestStatus.PROVISIONED, RequestStatus.CANCELED, RequestStatus.STALE, RequestStatus.DECIDED, RequestStatus.FINISHED_R], session=session)
         if not reqs:
             return
         
@@ -123,7 +126,8 @@ class SENSEHandlerDaemon(DaemonBase):
                     req.set_status(target_status, session=session)
                 else:
                     logging.warning(f"Request {req.rule_id} has reached max SENSE retries. Marking as failed.")
-                    req.set_status(RequestStatus.FAILED, session=session)
+                    last_error = req.failure_reason or "unknown error"
+                    req.mark_failed(f"Reached max SENSE retries ({req.sense_retries}). Last error: {last_error}", session=session)
                     release_endpoints_and_addresses(req, session)
             
             if req.sense_uuid is None:
@@ -138,17 +142,25 @@ class SENSEHandlerDaemon(DaemonBase):
 
             # Affiliate endpoints when ready
             if not req.sense_affiliated and is_affiliated_state(status):
+                if not req.src_pool_site or not req.dst_pool_site:
+                    logging.error(
+                        f"Request {req.rule_id} has no source/destination site, cannot affiliate endpoints"
+                    )
+                    continue
                 logging.debug(f"Request {req.rule_id} is not affiliated with SENSE instance {req.sense_uuid}, affiliating now.")
-                affiliate_endpoints(
-                    sense_uuid=req.sense_uuid,
-                    src_site_name=req.src_site.name,
-                    dst_site_name=req.dst_site.name,
-                    src_ip_range=req.src_endpoint.ip_range,
-                    dst_ip_range=req.dst_endpoint.ip_range,
-                    sense_src_uri=req.sense_src_uri,
-                    sense_dst_uri=req.sense_dst_uri
-                )
-                req.update({"sense_affiliated": True}, session=session)
+                try:
+                    affiliate_endpoints(
+                        sense_uuid=req.sense_uuid,
+                        src_pool_site=req.src_pool_site,
+                        dst_pool_site=req.dst_pool_site,
+                        rule_id=req.rule_id,
+                        sense_src_uri=req.sense_src_uri,
+                        sense_dst_uri=req.sense_dst_uri
+                    )
+                    req.update({"sense_affiliated": True}, session=session)
+                except Exception as e:
+                    logging.error(f"Failed to affiliate endpoints for {req.rule_id}, will retry next cycle: {e}")
+                    continue
 
             if not req.sense_provisioned_at and is_create_ready(status):
                 logging.debug(f"Request {req.rule_id} is ready, updating sense_provisioned_at to current time.")
@@ -159,7 +171,7 @@ class SENSEHandlerDaemon(DaemonBase):
                     f"Request {req.rule_id} reached CREATE_FAILED after being PROVISIONED; "
                     "marking as RETRY to re-enter SENSE retry flow"
                 )
-                req.set_status(RequestStatus.RETRY, session=session)
+                req.mark_retry(f"Circuit reached {status} after being PROVISIONED", session=session)
 
             elif (
                 req.transfer_status == RequestStatus.STALE
@@ -175,6 +187,20 @@ class SENSEHandlerDaemon(DaemonBase):
                 )
                 req.set_status(RequestStatus.PROVISIONED, session=session)
 
+            elif (
+                req.transfer_status == RequestStatus.FINISHED_R
+                and is_being_modified(prev_circuit_status)
+                and is_ready_for_modify(status)
+            ):
+                # The modifier submitted a throttle (to 1 Gbps) for this finished request
+                # and set MODIFY_COMMITTING.  SENSE has now confirmed the throttle was applied
+                # (circuit back in READY state).  Safe to mark FINISHED so the canceller proceeds.
+                logging.info(
+                    f"Request {req.rule_id} throttle modification confirmed "
+                    f"({prev_circuit_status} → {status}), marking as FINISHED"
+                )
+                req.set_status(RequestStatus.FINISHED, session=session)
+
             elif req.transfer_status == RequestStatus.PROVISIONED and is_modify_failed(status):
                 # A modification entered MODIFY - FAILED while the request was already
                 # PROVISIONED (e.g. SENSE-O internally retried and failed).  Re-queue as
@@ -186,4 +212,3 @@ class SENSEHandlerDaemon(DaemonBase):
                 req.set_status(RequestStatus.STALE, session=session)
 
         self._rebalance_fts_streams(session)
-                

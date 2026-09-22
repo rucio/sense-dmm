@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime
 
 from dmm.daemons.base import DaemonBase
 
@@ -6,11 +7,13 @@ from dmm.db.session import databased
 from dmm.models.request import Request, RequestStatus, SenseCircuitStatus
 from dmm.models.mesh import Mesh
 
-from dmm.core.config import config_get
+from dmm.core.config import config_get, config_get_int
+from dmm.core.utils import is_sync_timeout
 from dmm.core.sense import (
     modify_link,
     cancel_link,
     delete_instance,
+    get_instance_status,
     is_ready_for_modify,
     is_being_modified,
     is_modify_failed,
@@ -59,20 +62,37 @@ class SENSEModifierDaemon(DaemonBase):
                 logging.debug(f"Request {req.rule_id} is already being modified, skipping")
                 continue
 
+            if req.sense_uuid is None:
+                logging.info(f"Request {req.rule_id} finished before SENSE circuit was created, marking as FINISHED directly")
+                req.set_status(status=RequestStatus.FINISHED, session=session)
+                continue
+
             # Skip if the circuit has been taken over by a new provisioned request
-            if req.sense_uuid and req.sense_uuid in reused_uuids:
+            if req.sense_uuid in reused_uuids:
                 logging.debug(
                     f"Request {req.rule_id} circuit {req.sense_uuid} has been reused by another "
                     f"request — skipping throttle/teardown, marking as DELETED"
                 )
                 req.set_status(status=RequestStatus.DELETED, session=session)
                 continue
-            
+
+            # Hold in FINISHED_R for a configurable grace period to allow circuit reuse
+            finished_r_hold_secs = config_get_int("sense", "finished_r_hold_seconds", default=120, constraint="nonneg")
+            if req.rucio_finished_at is not None:
+                elapsed = (datetime.now() - req.rucio_finished_at).total_seconds()
+                if elapsed < finished_r_hold_secs:
+                    logging.debug(
+                        f"Request {req.rule_id} entered FINISHED_R {elapsed:.0f}s ago, "
+                        f"holding for {finished_r_hold_secs}s before throttle/teardown"
+                    )
+                    continue
+
             try:
                 vlan_range = Mesh.get_vlan_range(site_1=req.src_site, site_2=req.dst_site, session=session)
                 if not vlan_range:
                     logging.error(f"No VLAN range found for {req.rule_id}")
                     continue
+                
                 modify_link(
                     sense_uuid=req.sense_uuid,
                     profile_uuid=self.profile_uuid,
@@ -84,10 +104,28 @@ class SENSEModifierDaemon(DaemonBase):
                     vlan_range=vlan_range,
                     rule_id=req.rule_id
                 )
-                req.set_status(status=RequestStatus.FINISHED, session=session)
-                logging.info(f"Set request {req.rule_id} to FINISHED")
+                req.set_sense_circuit_status(
+                    status=SenseCircuitStatus.MODIFY_COMMITTING.value, session=session
+                )
+                logging.info(
+                    f"Submitted throttle for {req.rule_id}, waiting for SENSE MODIFY-READY before marking FINISHED"
+                )
             except Exception as e:
-                logging.error(f"Failed to set request {req.rule_id} to FINISHED: {e}", exc_info=True)
+                if is_sync_timeout(e):
+                    logging.warning(
+                        f"Throttle of finished request {req.rule_id} timed out (504); "
+                        "marking MODIFY_COMMITTING, waiting for SENSE MODIFY-READY before FINISHED"
+                    )
+                    req.set_sense_circuit_status(
+                        status=SenseCircuitStatus.MODIFY_COMMITTING.value, session=session
+                    )
+                else:
+                    logging.error(
+                        f"Failed to throttle {req.rule_id}: {e} — "
+                        "skipping throttle, advancing to FINISHED for cancellation",
+                        exc_info=True,
+                    )
+                    req.set_status(status=RequestStatus.FINISHED, session=session)
 
         for req in reqs_stale:
             # Skip this specific request if it's already being modified
@@ -129,20 +167,30 @@ class SENSEModifierDaemon(DaemonBase):
                         "Cancelling and deleting the failed instance to rebuild from scratch."
                     )
                     failed_uuid = req.sense_uuid
-                    try:
-                        cancel_link(failed_uuid, status)
-                        delete_instance(failed_uuid)
-                        logging.info(
-                            f"Successfully cancelled and deleted MODIFY-FAILED instance "
-                            f"{failed_uuid} for {req.rule_id}"
+                    # Before attempting cancel/delete, check if SENSE has already cleaned up
+                    # this circuit (e.g., auto-cancelled after the modify rejection).
+                    # If so, skip the cancel/delete and go straight to the ALLOCATED reset.
+                    current_sense_status = get_instance_status(failed_uuid)
+                    if current_sense_status == "UNKNOWN":
+                        logging.warning(
+                            f"Circuit {failed_uuid} is already gone from SENSE (status=UNKNOWN) "
+                            f"— skipping cancel/delete, resetting {req.rule_id} to ALLOCATED"
                         )
-                    except Exception as e:
-                        logging.error(
-                            f"Failed to cancel/delete MODIFY-FAILED instance {failed_uuid} "
-                            f"for {req.rule_id}: {e} — will retry next cycle",
-                            exc_info=True,
-                        )
-                        continue
+                    else:
+                        try:
+                            cancel_link(failed_uuid, status)
+                            delete_instance(failed_uuid)
+                            logging.info(
+                                f"Successfully cancelled and deleted MODIFY-FAILED instance "
+                                f"{failed_uuid} for {req.rule_id}"
+                            )
+                        except Exception as e:
+                            logging.error(
+                                f"Failed to cancel/delete MODIFY-FAILED instance {failed_uuid} "
+                                f"for {req.rule_id}: {e} — will retry next cycle",
+                                exc_info=True,
+                            )
+                            continue
                     req.update({
                         "sense_uuid": None,
                         "sense_src_uri": None,
@@ -180,7 +228,20 @@ class SENSEModifierDaemon(DaemonBase):
                     status=SenseCircuitStatus.MODIFY_COMMITTING.value, session=session
                 )
                 logging.info(f"Submitted bandwidth modification for {req.rule_id}, waiting for SENSE confirmation")
-                
+
             except Exception as e:
-                logging.error(f"Failed to modify link for {req.rule_id}: {e}", exc_info=True)
+                if is_sync_timeout(e):
+                    # 504 — the modify is almost certainly still committing upstream and
+                    # will succeed. Mark MODIFY_COMMITTING (exactly as on a successful
+                    # submit) so the handler confirms MODIFY-READY → PROVISIONED, rather
+                    # than re-issuing the modify against an in-flight commit.
+                    logging.warning(
+                        f"Modify of {req.rule_id} timed out (504); treating as in-flight, "
+                        "marking MODIFY-COMMITTING for handler confirmation"
+                    )
+                    req.set_sense_circuit_status(
+                        status=SenseCircuitStatus.MODIFY_COMMITTING.value, session=session
+                    )
+                else:
+                    logging.error(f"Failed to modify link for {req.rule_id}: {e}", exc_info=True)
             
