@@ -1,6 +1,7 @@
-from sqlmodel import Field, Relationship, select
-from typing import Optional, List
+from sqlmodel import Field, Relationship, or_, select
+from typing import Optional, List, ClassVar
 from enum import Enum
+from datetime import datetime, timedelta, timezone
 
 import logging
 
@@ -33,6 +34,8 @@ class SenseCircuitStatus(str, Enum):
     MODIFY_COMMITTED   = "MODIFY - COMMITTED"
     MODIFY_FAILED      = "MODIFY - FAILED"
     REINSTATE_READY    = "REINSTATE - READY"
+    CANCEL_COMMITTING  = "CANCEL - COMMITTING"
+    CANCEL_COMMITTED   = "CANCEL - COMMITTED"
     CANCEL_READY       = "CANCEL - READY"
 
 class Request(ModelBase, table=True):
@@ -57,7 +60,17 @@ class Request(ModelBase, table=True):
     prometheus_bytes: Optional[float] = Field(default=None)
     health: Optional[str] = Field(default=None)
     sense_retries: Optional[int] = Field(default=0)
-    
+    sense_alloc_rule_id: Optional[str] = Field(default=None)
+    failure_reason: Optional[str] = Field(default=None)
+    failed_at: Optional[datetime] = Field(default=None)
+
+    # Site names as Rucio sent them. Several logical sites can map to one
+    # physical site (T2_US_UCSD_Blackhole -> T2_US_UCSD); src_site_/dst_site_
+    # below are always the physical site. The logical name picks the SENSE-O
+    # subnet pool and nothing else.
+    src_logical_site: Optional[str] = Field(default=None)
+    dst_logical_site: Optional[str] = Field(default=None)
+
     src_site_: Optional[str] = Field(default=None, foreign_key='site.name')
     dst_site_: Optional[str] = Field(default=None, foreign_key='site.name')
     src_endpoint_: Optional[int] = Field(default=None, foreign_key='endpoint.id')
@@ -88,6 +101,50 @@ class Request(ModelBase, table=True):
             return NotImplemented
         return self.rule_id == other.rule_id
 
+    # Requests created before multi-logical-site support have no logical site
+    # recorded; back then the pool was named after the physical site, so falling
+    # back to it keeps their allocations addressable.
+    @property
+    def src_pool_site(self) -> Optional[str]:
+        """Logical site whose SENSE-O subnet pool holds the source allocation."""
+        return self.src_logical_site or (self.src_site.name if self.src_site else None)
+
+    @property
+    def dst_pool_site(self) -> Optional[str]:
+        """Logical site whose SENSE-O subnet pool holds the destination allocation."""
+        return self.dst_logical_site or (self.dst_site.name if self.dst_site else None)
+
+    # Requests in these states never change again, so exporting them forever
+    # only grows the series count.
+    TERMINAL_STATUSES: ClassVar[List[str]] = [
+        RequestStatus.FAILED,
+        RequestStatus.CANCELED,
+        RequestStatus.DELETED,
+    ]
+
+    @classmethod
+    def get_for_metrics(cls, session=None, terminal_window_hours: int = 6, limit: int = 5000):
+        """Requests worth exporting: everything live, plus recently-finished ones.
+
+        Unbounded export means a full table scan per scrape and a series count
+        that only ever grows. Terminal requests are kept briefly so a rule that
+        just failed is still visible on a dashboard.
+
+        The cutoff uses the same clock ModelBase.save writes with, so the
+        comparison is against like values.
+        """
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=terminal_window_hours)
+        statement = (
+            select(cls)
+            .where(or_(
+                cls.transfer_status.notin_(cls.TERMINAL_STATUSES),
+                cls.updated_at >= cutoff,
+            ))
+            .order_by(cls.updated_at.desc())
+            .limit(limit)
+        )
+        return list(session.exec(statement).all())
+
     @classmethod
     def get_by_status(cls, statuses: List[str], session=None, use_lock: bool = True):
         logging.debug(f"REQUEST QUERY: statuses={statuses}, locked={use_lock}")
@@ -104,9 +161,52 @@ class Request(ModelBase, table=True):
             statement = statement.with_for_update()
         return session.exec(statement).first()
     
+    # Failure reasons can be long (tracebacks, SENSE error blobs); cap what we persist.
+    FAILURE_REASON_MAX_LEN: ClassVar[int] = 2000
+
+    @classmethod
+    def _truncate_reason(cls, reason) -> Optional[str]:
+        if reason is None:
+            return None
+        reason = str(reason).strip()
+        if len(reason) > cls.FAILURE_REASON_MAX_LEN:
+            reason = reason[: cls.FAILURE_REASON_MAX_LEN - 3] + "..."
+        return reason
+
     def set_status(self, status: str, session=None):
         logging.debug(f"REQUEST UPDATE: {self.rule_id} -> status={status}")
-        self.transfer_status = status 
+        self.transfer_status = status
+        self.save(session)
+
+    def set_failure_reason(self, reason, session=None):
+        reason = self._truncate_reason(reason)
+        logging.debug(f"REQUEST UPDATE: {self.rule_id} -> failure_reason={reason}")
+        self.failure_reason = reason
+        self.save(session)
+
+    def clear_failure_reason(self, session=None):
+        if self.failure_reason is None and self.failed_at is None:
+            return
+        logging.debug(f"REQUEST UPDATE: {self.rule_id} -> clearing failure_reason")
+        self.failure_reason = None
+        self.failed_at = None
+        self.save(session)
+
+    def mark_failed(self, reason, session=None):
+        """Permanently fail the request, recording why and when."""
+        reason = self._truncate_reason(reason)
+        logging.debug(f"REQUEST UPDATE: {self.rule_id} -> FAILED ({reason})")
+        self.transfer_status = RequestStatus.FAILED
+        self.failure_reason = reason
+        self.failed_at = datetime.now()
+        self.save(session)
+
+    def mark_retry(self, reason, session=None):
+        """Transient failure: record the reason but keep the request retrying."""
+        reason = self._truncate_reason(reason)
+        logging.debug(f"REQUEST UPDATE: {self.rule_id} -> RETRY ({reason})")
+        self.transfer_status = RequestStatus.RETRY
+        self.failure_reason = reason
         self.save(session)
 
     def set_available_bandwidth(self, bandwidth_mbps: float, session=None):
